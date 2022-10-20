@@ -1114,6 +1114,12 @@ func competitionScoreHandler(c echo.Context) error {
 			UpdatedAt:     now,
 		})
 	}
+	if len(playerIDmap) == 0 {
+		return c.JSON(http.StatusOK, SuccessResult{
+			Status: true,
+			Data:   ScoreHandlerResult{Rows: int64(len(playerScoreRows))},
+		})
+	}
 	placeHolder := ""
 	args := []any{}
 	for k := range playerIDmap {
