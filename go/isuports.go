@@ -1012,7 +1012,7 @@ func competitionFinishHandler(c echo.Context) error {
 	}
 	go func() {
 		ctx := context.Background()
-		err := createBillingReport(ctx, tenantDB, v.tenantID, id)
+		err := createBillingReport(ctx, v.tenantID, id)
 		if err != nil {
 			c.Logger().Error(err)
 			return
@@ -1021,7 +1021,12 @@ func competitionFinishHandler(c echo.Context) error {
 	return c.JSON(http.StatusOK, SuccessResult{Status: true})
 }
 
-func createBillingReport(ctx context.Context, tenantDB *sqlx.DB, tenantID int64, competitionID string) error {
+func createBillingReport(ctx context.Context, tenantID int64, competitionID string) error {
+	tenantDB, err := connectToTenantDB(tenantID)
+	if err != nil {
+		return err
+	}
+	defer tenantDB.Close()
 	report, err := billingReportByCompetition(ctx, tenantDB, tenantID, competitionID)
 	if err != nil {
 		return err
@@ -1766,29 +1771,36 @@ func initializeHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 	// 初期データとして登録されているテナントの、終了済み大会のBillingReportを生成する
 	for i := 1; i <= 100; i++ {
-		tenantDB, err := connectToTenantDB(int64(i))
-		if err != nil {
-			return fmt.Errorf("error connectToTenantDB: %d %e", i, err)
-		}
-		cs := []CompetitionRow{}
-		err = tenantDB.SelectContext(
-			ctx,
-			&cs,
-			"SELECT * FROM competition WHERE tenant_id = ? AND finished_at IS NOT NULL ",
-			int64(i),
-		)
-		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("error Select competition: %w", err)
-			}
-			continue
-		}
-
-		for _, comp := range cs {
-			err := createBillingReport(ctx, tenantDB, int64(i), comp.ID)
+		err := func() error {
+			tenantDB, err := connectToTenantDB(int64(i))
 			if err != nil {
-				return fmt.Errorf("error createBillingReport: %w", err)
+				return fmt.Errorf("error connectToTenantDB: %d %e", i, err)
 			}
+			defer tenantDB.Close()
+			cs := []CompetitionRow{}
+			err = tenantDB.SelectContext(
+				ctx,
+				&cs,
+				"SELECT * FROM competition WHERE tenant_id = ? AND finished_at IS NOT NULL ",
+				int64(i),
+			)
+			if err != nil {
+				if !errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("error Select competition: %w", err)
+				}
+				return nil
+			}
+
+			for _, comp := range cs {
+				err := createBillingReport(ctx, int64(i), comp.ID)
+				if err != nil {
+					return fmt.Errorf("error createBillingReport: %w", err)
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
 	}
 	res := InitializeHandlerResult{
