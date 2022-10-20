@@ -712,7 +712,7 @@ func tenantsBillingHandler(c echo.Context) error {
 			// 	return fmt.Errorf("failed to Select competition: %w", err)
 			// }
 			query := "SELECT SUM(`billing_yen`) FROM `billing_report` WHERE `tenant_id` = ? "
-			var billingSum int
+			var billingSum sql.NullInt64
 			err := adminDB.QueryRowContext(ctx, query, t.ID).Scan(&billingSum)
 			if err != nil {
 				return fmt.Errorf("failed to get billing_report: %w", err)
@@ -724,7 +724,9 @@ func tenantsBillingHandler(c echo.Context) error {
 			// 	}
 			// 	tb.BillingYen += report.BillingYen
 			// }
-			tb.BillingYen = int64(billingSum)
+			if billingSum.Valid {
+				tb.BillingYen = billingSum.Int64
+			}
 			tenantBillings = append(tenantBillings, tb)
 			return nil
 		}(t)
