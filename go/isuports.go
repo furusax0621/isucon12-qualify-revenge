@@ -1056,11 +1056,12 @@ func competitionScoreHandler(c echo.Context) error {
 	}
 
 	// / DELETEしたタイミングで参照が来ると空っぽのランキングになるのでロックする
-	fl, err := flockByTenantID(v.tenantID)
-	if err != nil {
-		return fmt.Errorf("error flockByTenantID: %w", err)
-	}
-	defer fl.Close()
+	// fl, err := flockByTenantID(v.tenantID)
+	// if err != nil {
+	// 	return fmt.Errorf("error flockByTenantID: %w", err)
+	// }
+	// defer fl.Close()
+
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	playerIDmap := map[string]struct{}{}
@@ -1131,7 +1132,13 @@ func competitionScoreHandler(c echo.Context) error {
 		)
 	}
 
-	if _, err := tenantDB.ExecContext(
+	tx, err := tenantDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("error BeginTx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(
 		ctx,
 		"DELETE FROM player_score WHERE tenant_id = ? AND competition_id = ?",
 		v.tenantID,
@@ -1166,9 +1173,13 @@ func competitionScoreHandler(c echo.Context) error {
 		// }
 	}
 	query = query[:len(query)-1]
-	_, err = tenantDB.ExecContext(ctx, query, args...)
+	_, err = tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("error Insert player_score: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("error Commit: %w", err)
 	}
 
 	return c.JSON(http.StatusOK, SuccessResult{
