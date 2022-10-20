@@ -529,13 +529,13 @@ func validateTenantName(name string) error {
 }
 
 type BillingReport struct {
-	CompetitionID     string `json:"competition_id"`
-	CompetitionTitle  string `json:"competition_title"`
-	PlayerCount       int64  `json:"player_count"`        // スコアを登録した参加者数
-	VisitorCount      int64  `json:"visitor_count"`       // ランキングを閲覧だけした(スコアを登録していない)参加者数
-	BillingPlayerYen  int64  `json:"billing_player_yen"`  // 請求金額 スコアを登録した参加者分
-	BillingVisitorYen int64  `json:"billing_visitor_yen"` // 請求金額 ランキングを閲覧だけした(スコアを登録していない)参加者分
-	BillingYen        int64  `json:"billing_yen"`         // 合計請求金額
+	CompetitionID     string `json:"competition_id" db:"competition_id"`
+	CompetitionTitle  string `json:"competition_title" db:"competition_title"`
+	PlayerCount       int64  `json:"player_count" db:"player_count"`               // スコアを登録した参加者数
+	VisitorCount      int64  `json:"visitor_count" db:"visitor_count"`             // ランキングを閲覧だけした(スコアを登録していない)参加者数
+	BillingPlayerYen  int64  `json:"billing_player_yen" db:"billing_player_yen"`   // 請求金額 スコアを登録した参加者分
+	BillingVisitorYen int64  `json:"billing_visitor_yen" db:"billing_visitor_yen"` // 請求金額 ランキングを閲覧だけした(スコアを登録していない)参加者分
+	BillingYen        int64  `json:"billing_yen" db:"billing_yen"`                 // 合計請求金額
 }
 
 type VisitHistoryRow struct {
@@ -686,27 +686,34 @@ func tenantsBillingHandler(c echo.Context) error {
 				Name:        t.Name,
 				DisplayName: t.DisplayName,
 			}
-			tenantDB, err := connectToTenantDB(t.ID)
+			// tenantDB, err := connectToTenantDB(t.ID)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to connectToTenantDB: %w", err)
+			// }
+			// defer tenantDB.Close()
+			// cs := []CompetitionRow{}
+			// if err := tenantDB.SelectContext(
+			// 	ctx,
+			// 	&cs,
+			// 	"SELECT * FROM competition WHERE tenant_id=?",
+			// 	t.ID,
+			// ); err != nil {
+			// 	return fmt.Errorf("failed to Select competition: %w", err)
+			// }
+			query := "SELECT SUM(`billing_yen`) FROM `billing_report` WHERE `tenant_id` = ? "
+			var billingSum int
+			err := adminDB.QueryRowContext(ctx, query, t.ID).Scan(&billingSum)
 			if err != nil {
-				return fmt.Errorf("failed to connectToTenantDB: %w", err)
+				return fmt.Errorf("failed to get billing_report: %w", err)
 			}
-			defer tenantDB.Close()
-			cs := []CompetitionRow{}
-			if err := tenantDB.SelectContext(
-				ctx,
-				&cs,
-				"SELECT * FROM competition WHERE tenant_id=?",
-				t.ID,
-			); err != nil {
-				return fmt.Errorf("failed to Select competition: %w", err)
-			}
-			for _, comp := range cs {
-				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
-				if err != nil {
-					return fmt.Errorf("failed to billingReportByCompetition: %w", err)
-				}
-				tb.BillingYen += report.BillingYen
-			}
+			// for _, comp := range cs {
+			// 	report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
+			// 	if err != nil {
+			// 		return fmt.Errorf("failed to billingReportByCompetition: %w", err)
+			// 	}
+			// 	tb.BillingYen += report.BillingYen
+			// }
+			tb.BillingYen = int64(billingSum)
 			tenantBillings = append(tenantBillings, tb)
 			return nil
 		}(t)
@@ -992,7 +999,43 @@ func competitionFinishHandler(c echo.Context) error {
 			now, now, id, err,
 		)
 	}
+	go func() {
+		ctx := context.Background()
+		err := createBillingReport(ctx, tenantDB, v.tenantID, id)
+		if err != nil {
+			c.Logger().Error(err)
+			return
+		}
+	}()
 	return c.JSON(http.StatusOK, SuccessResult{Status: true})
+}
+
+func createBillingReport(ctx context.Context, tenantDB *sqlx.DB, tenantID int64, competitionID string) error {
+	report, err := billingReportByCompetition(ctx, tenantDB, tenantID, competitionID)
+	if err != nil {
+		return err
+	}
+	query := "INSERT INTO `billing_report` ( " +
+		"`tenant_id`, " +
+		"`competition_id`, " +
+		"`competition_title`, " +
+		"`player_count`, " +
+		"`visitor_count`, " +
+		"`billing_player_yen`, " +
+		"`billing_visitor_yen`, " +
+		"`billing_yen` " +
+		") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+	_, err = adminDB.ExecContext(ctx, query,
+		tenantID,
+		report.CompetitionID,
+		report.CompetitionTitle,
+		report.PlayerCount,
+		report.VisitorCount,
+		report.BillingPlayerYen,
+		report.BillingVisitorYen,
+		report.BillingYen,
+	)
+	return err
 }
 
 type ScoreHandlerResult struct {
@@ -1230,11 +1273,24 @@ func billingHandler(c echo.Context) error {
 	}
 	tbrs := make([]BillingReport, 0, len(cs))
 	for _, comp := range cs {
-		report, err := billingReportByCompetition(ctx, tenantDB, v.tenantID, comp.ID)
+		query := "SELECT * FROM `billing_report` WHERE `tenant_id` = ? AND `competition_id` = ? "
+		var report BillingReport
+		err := adminDB.QueryRowxContext(ctx, query, v.tenantID, comp.ID).StructScan(&report)
 		if err != nil {
-			return fmt.Errorf("error billingReportByCompetition: %w", err)
+			if !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("error get `billing_report` : %w", err)
+			}
+			report = BillingReport{
+				CompetitionID:     comp.ID,
+				CompetitionTitle:  comp.Title,
+				PlayerCount:       0,
+				VisitorCount:      0,
+				BillingPlayerYen:  0,
+				BillingVisitorYen: 0,
+				BillingYen:        0,
+			}
 		}
-		tbrs = append(tbrs, *report)
+		tbrs = append(tbrs, report)
 	}
 
 	res := SuccessResult{
@@ -1684,6 +1740,33 @@ func initializeHandler(c echo.Context) error {
 	out, err := exec.Command(initializeScript).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
+	}
+	ctx := c.Request().Context()
+	for i := 1; i <= 100; i++ {
+		tenantDB, err := connectToTenantDB(int64(i))
+		if err != nil {
+			return fmt.Errorf("error connectToTenantDB: %d %e", i, err)
+		}
+		cs := []CompetitionRow{}
+		err = tenantDB.SelectContext(
+			ctx,
+			&cs,
+			"SELECT * FROM competition WHERE tenant_id = ? AND finished_at IS NOT NULL ",
+			int64(i),
+		)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("error Select competition: %w", err)
+			}
+			continue
+		}
+
+		for _, comp := range cs {
+			err := createBillingReport(ctx, tenantDB, int64(i), comp.ID)
+			if err != nil {
+				return fmt.Errorf("error createBillingReport: %w", err)
+			}
+		}
 	}
 	res := InitializeHandlerResult{
 		Lang: "go",
