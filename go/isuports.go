@@ -538,6 +538,17 @@ type BillingReport struct {
 	BillingYen        int64  `json:"billing_yen" db:"billing_yen"`                 // 合計請求金額
 }
 
+type BillingReportRow struct {
+	TenantID          int64  `db:"tenant_id"`
+	CompetitionID     string `json:"competition_id" db:"competition_id"`
+	CompetitionTitle  string `json:"competition_title" db:"competition_title"`
+	PlayerCount       int64  `json:"player_count" db:"player_count"`               // スコアを登録した参加者数
+	VisitorCount      int64  `json:"visitor_count" db:"visitor_count"`             // ランキングを閲覧だけした(スコアを登録していない)参加者数
+	BillingPlayerYen  int64  `json:"billing_player_yen" db:"billing_player_yen"`   // 請求金額 スコアを登録した参加者分
+	BillingVisitorYen int64  `json:"billing_visitor_yen" db:"billing_visitor_yen"` // 請求金額 ランキングを閲覧だけした(スコアを登録していない)参加者分
+	BillingYen        int64  `json:"billing_yen" db:"billing_yen"`                 // 合計請求金額
+}
+
 type VisitHistoryRow struct {
 	PlayerID      string `db:"player_id"`
 	TenantID      int64  `db:"tenant_id"`
@@ -1274,8 +1285,9 @@ func billingHandler(c echo.Context) error {
 	tbrs := make([]BillingReport, 0, len(cs))
 	for _, comp := range cs {
 		query := "SELECT * FROM `billing_report` WHERE `tenant_id` = ? AND `competition_id` = ? "
+		var row BillingReportRow
+		err := adminDB.QueryRowxContext(ctx, query, v.tenantID, comp.ID).StructScan(&row)
 		var report BillingReport
-		err := adminDB.QueryRowxContext(ctx, query, v.tenantID, comp.ID).StructScan(&report)
 		if err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("error get `billing_report` : %w", err)
@@ -1288,6 +1300,16 @@ func billingHandler(c echo.Context) error {
 				BillingPlayerYen:  0,
 				BillingVisitorYen: 0,
 				BillingYen:        0,
+			}
+		} else {
+			report = BillingReport{
+				CompetitionID:     row.CompetitionID,
+				CompetitionTitle:  row.CompetitionTitle,
+				PlayerCount:       row.PlayerCount,
+				VisitorCount:      row.VisitorCount,
+				BillingPlayerYen:  row.BillingPlayerYen,
+				BillingVisitorYen: row.BillingVisitorYen,
+				BillingYen:        row.BillingYen,
 			}
 		}
 		tbrs = append(tbrs, report)
@@ -1742,6 +1764,7 @@ func initializeHandler(c echo.Context) error {
 		return fmt.Errorf("error exec.Command: %s %e", string(out), err)
 	}
 	ctx := c.Request().Context()
+	// 初期データとして登録されているテナントの、終了済み大会のBillingReportを生成する
 	for i := 1; i <= 100; i++ {
 		tenantDB, err := connectToTenantDB(int64(i))
 		if err != nil {
